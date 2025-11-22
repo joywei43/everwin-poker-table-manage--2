@@ -1,83 +1,63 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react';
 
-type Lang = 'zh' | 'en'
-
-type SeatStatus = 'idle' | 'seated' | 'rest'
+type SeatStatus = 'idle' | 'seated' | 'rest';
+type Lang = 'zh' | 'en';
 
 interface SeatState {
-  id: number
-  memberId: string
-  status: SeatStatus
-  activeSeconds: number
-  restSeconds: number
-  buyIn: number
-  joinCount: number
-  lastTickTs: number | null
-  selected: boolean
+  id: number;
+  memberId: string;
+  status: SeatStatus;
+  activeSeconds: number;
+  restSeconds: number;
+  lastActiveStart: number | null;
+  lastRestStart: number | null;
+  buyIn: number;
+  joinCount: number;
+  selectedForBatch: boolean;
 }
 
 interface TableState {
-  id: number
-  name: string
-  isRunning: boolean
-  openedAt: string | null
-  closedAt: string | null
-  tableSeconds: number
-  lastTickTs: number | null
-  seats: SeatState[]
+  id: number;
+  name: string;
+  blinds: string;
+  openedAt: string | null;
+  closedAt: string | null;
+  elapsedSeconds: number;
+  lastStartTime: number | null;
+  isRunning: boolean;
+  seats: SeatState[];
 }
 
-const TABLE_COUNT = 4
-const SEATS_PER_TABLE = 9
-const TICK_INTERVAL = 1000
-
-function nowTs() {
-  return Date.now()
-}
+const TABLE_COUNT = 4;
+const SEATS_PER_TABLE = 9;
+const STORAGE_KEY = 'everwin_poker_tables_v3';
 
 function formatHMS(totalSeconds: number): string {
-  const sec = Math.floor(totalSeconds)
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  const s = sec % 60
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(h)}:${pad(m)}:${pad(s)}`
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${pad(h)}:${pad(m)}:${pad(sec)}`;
 }
 
-function formatDateTime(d: Date | null): string {
-  if (!d) return '-'
-  const y = d.getFullYear()
-  const m = `${d.getMonth() + 1}`.padStart(2, '0')
-  const day = `${d.getDate()}`.padStart(2, '0')
-  const hr24 = d.getHours()
-  const isPM = hr24 >= 12
-  const hr12 = hr24 % 12 || 12
-  const mi = `${d.getMinutes()}`.padStart(2, '0')
-  const ampm = isPM ? '下午' : '上午'
-  return `${y}/${m}/${day} ${ampm}${hr12}:${mi}`
+function formatDateTime(d: Date): string {
+  const y = d.getFullYear();
+  const m = (d.getMonth() + 1).toString().padStart(2, '0');
+  const day = d.getDate().toString().padStart(2, '0');
+  const h = d.getHours().toString().padStart(2, '0');
+  const min = d.getMinutes().toString().padStart(2, '0');
+  const sec = d.getSeconds().toString().padStart(2, '0');
+  const ampm = d.getHours() >= 12 ? '下午' : '上午';
+  return `${y}/${m}/${day} ${ampm}${h}:${min}:${sec}`;
 }
 
-function usePersistentState<T>(key: string, initial: () => T): [T, React.Dispatch<React.SetStateAction<T>>] {
-  const [state, setState] = useState<T>(() => {
-    if (typeof window === 'undefined') return initial()
-    try {
-      const raw = window.localStorage.getItem(key)
-      if (!raw) return initial()
-      return JSON.parse(raw) as T
-    } catch {
-      return initial()
-    }
-  })
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(key, JSON.stringify(state))
-    } catch {
-      // ignore
-    }
-  }, [key, state])
-
-  return [state, setState]
+function formatToday(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = (d.getMonth() + 1).toString().padStart(2, '0');
+  const day = d.getDate().toString().padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function createInitialSeat(id: number): SeatState {
@@ -87,616 +67,802 @@ function createInitialSeat(id: number): SeatState {
     status: 'idle',
     activeSeconds: 0,
     restSeconds: 0,
+    lastActiveStart: null,
+    lastRestStart: null,
     buyIn: 0,
     joinCount: 0,
-    lastTickTs: null,
-    selected: false,
-  }
+    selectedForBatch: false,
+  };
 }
 
 function createInitialTable(id: number): TableState {
   return {
     id,
     name: `Table ${id}`,
-    isRunning: false,
+    blinds: '',
     openedAt: null,
     closedAt: null,
-    tableSeconds: 0,
-    lastTickTs: null,
+    elapsedSeconds: 0,
+    lastStartTime: null,
+    isRunning: false,
     seats: Array.from({ length: SEATS_PER_TABLE }, (_, i) => createInitialSeat(i + 1)),
+  };
+}
+
+function loadInitialTables(): TableState[] {
+  if (typeof window === 'undefined') return Array.from({ length: TABLE_COUNT }, (_, i) => createInitialTable(i + 1));
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return Array.from({ length: TABLE_COUNT }, (_, i) => createInitialTable(i + 1));
+    const parsed = JSON.parse(raw) as TableState[];
+    return parsed.map((t, idx) => ({
+      ...createInitialTable(idx + 1),
+      ...t,
+      id: idx + 1,
+      seats: t.seats
+        ? t.seats.map((s, seatIdx) => ({
+            ...createInitialSeat(seatIdx + 1),
+            ...s,
+            id: seatIdx + 1,
+          }))
+        : Array.from({ length: SEATS_PER_TABLE }, (_, i) => createInitialSeat(i + 1)),
+    }));
+  } catch {
+    return Array.from({ length: TABLE_COUNT }, (_, i) => createInitialTable(i + 1));
   }
 }
 
+function usePersistentTables(): [TableState[], React.Dispatch<React.SetStateAction<TableState[]>>] {
+  const [tables, setTables] = useState<TableState[]>(() => loadInitialTables());
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tables));
+  }, [tables]);
+
+  return [tables, setTables];
+}
+
+function getTableElapsedSeconds(table: TableState, nowMs: number): number {
+  if (table.isRunning && table.lastStartTime != null) {
+    const delta = Math.floor((nowMs - table.lastStartTime) / 1000);
+    return table.elapsedSeconds + Math.max(0, delta);
+  }
+  return table.elapsedSeconds;
+}
+
+function getSeatActiveSeconds(seat: SeatState, nowMs: number): number {
+  if (seat.status === 'seated' && seat.lastActiveStart != null) {
+    const delta = Math.floor((nowMs - seat.lastActiveStart) / 1000);
+    return seat.activeSeconds + Math.max(0, delta);
+  }
+  return seat.activeSeconds;
+}
+
+function getSeatRestSeconds(seat: SeatState, nowMs: number): number {
+  if (seat.status === 'rest' && seat.lastRestStart != null) {
+    const delta = Math.floor((nowMs - seat.lastRestStart) / 1000);
+    return seat.restSeconds + Math.max(0, delta);
+  }
+  return seat.restSeconds;
+}
+
+const zhTexts = {
+  tableLabel: '桌號',
+  running: '運行中',
+  stopped: '未開桌',
+  startOrResume: '開桌 / 繼續',
+  pause: '暫停牌桌',
+  stop: '關桌',
+  exportCsv: '匯出本局 CSV',
+  resetTable: 'Reset 本桌',
+  today: '今天',
+  currentTableTime: '牌桌時間',
+  openedAt: '開桌時間',
+  closedAt: '關桌時間',
+  blinds: '盲注級別',
+  blindsPlaceholder: '例如 25-50 / 50-100',
+  seat: '席次',
+  statusIdle: '空位 / 未上桌',
+  statusSeated: '上桌中',
+  statusRest: '休息中',
+  todayTotal: '今日總上桌',
+  todayCount: '今日上桌次數',
+  restSeconds: '休息秒數',
+  buyIn: '買碼',
+  memberId: '會員ID',
+  batchLabel: '批次選取',
+  btnSeat: '上桌',
+  btnRest: '休息',
+  btnLeave: '下桌',
+  btnAddBuyIn: '加買籌碼',
+  tableHasPlayers: '仍有玩家在桌上（非休息），請先讓所有玩家下桌。',
+  tableNotRunning: '請先運行開桌，再為玩家上桌。',
+  needMemberId: '請先輸入會員號碼再上桌。',
+  duplicateMember: '同一位會員已在其他位置上桌，請確認。',
+  batchNoSelection: '請先勾選要批次上桌的席次。',
+  batchMissingMember: '批次上桌的每個席次都必須先輸入會員號。',
+  batchPromptChips: '請輸入本次上桌每位玩家的買入籌碼（金額，可為 0）',
+  invalidNumber: '請輸入正確的數字。',
+};
+
+const enTexts = {
+  tableLabel: 'Table',
+  running: 'Running',
+  stopped: 'Stopped',
+  startOrResume: 'Start / Resume',
+  pause: 'Pause',
+  stop: 'Close Table',
+  exportCsv: 'Export CSV',
+  resetTable: 'Reset Table',
+  today: 'Today',
+  currentTableTime: 'Table Time',
+  openedAt: 'Opened At',
+  closedAt: 'Closed At',
+  blinds: 'Blinds',
+  blindsPlaceholder: 'e.g. 25-50 / 50-100',
+  seat: 'Seat',
+  statusIdle: 'Empty / Idle',
+  statusSeated: 'Seated',
+  statusRest: 'Resting',
+  todayTotal: 'Total Seated Today',
+  todayCount: 'Seat Count Today',
+  restSeconds: 'Rest Seconds',
+  buyIn: 'Buy-in',
+  memberId: 'Member ID',
+  batchLabel: 'Batch',
+  btnSeat: 'Seat',
+  btnRest: 'Rest',
+  btnLeave: 'Leave',
+  btnAddBuyIn: 'Add Chips',
+  tableHasPlayers: 'There are still players seated (not resting). Please let them leave first.',
+  tableNotRunning: 'Please start the table clock before seating players.',
+  needMemberId: 'Please enter a member ID before seating.',
+  duplicateMember: 'This member is already seated at another position.',
+  batchNoSelection: 'Please select seats for batch seating first.',
+  batchMissingMember: 'Every batch seat must have a member ID.',
+  batchPromptChips: 'Enter buy-in amount for each selected player (can be 0).',
+  invalidNumber: 'Please enter a valid number.',
+};
+
 const App: React.FC = () => {
-  const [lang, setLang] = usePersistentState<Lang>('everwin_lang', () => 'zh')
-  const [tables, setTables] = usePersistentState<TableState[]>('everwin_tables_v2', () =>
-    Array.from({ length: TABLE_COUNT }, (_, i) => createInitialTable(i + 1)),
-  )
-  const [currentTableIndex, setCurrentTableIndex] = usePersistentState<number>('everwin_current_table', () => 0)
+  const [tables, setTables] = usePersistentTables();
+  const [currentTableId, setCurrentTableId] = useState(1);
+  const [lang, setLang] = useState<Lang>('zh');
+  const [nowMs, setNowMs] = useState(Date.now());
 
-  // keep current index valid
   useEffect(() => {
-    if (currentTableIndex < 0 || currentTableIndex >= tables.length) {
-      setCurrentTableIndex(0)
-    }
-  }, [currentTableIndex, tables.length, setCurrentTableIndex])
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
 
-  const currentTable = tables[Math.max(0, Math.min(currentTableIndex, tables.length - 1))]
+  const t = lang === 'zh' ? zhTexts : enTexts;
+  const todayText = formatToday();
 
-  // global ticker
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setTables(prev => {
-        const ts = nowTs()
-        return prev.map(table => {
-          if (!table.isRunning) {
-            return {
-              ...table,
-              lastTickTs: ts,
-              seats: table.seats.map(s => ({ ...s, lastTickTs: ts })),
-            }
-          }
+  const currentTableIndex = useMemo(
+    () => tables.findIndex((t) => t.id === currentTableId) ?? 0,
+    [tables, currentTableId],
+  );
+  const currentTable = tables[currentTableIndex] ?? tables[0];
 
-          const lastTs = table.lastTickTs ?? ts
-          const deltaSec = (ts - lastTs) / 1000
+  const langToggleLabel = lang === 'zh' ? 'English' : '中文';
 
-          const updatedSeats = table.seats.map(seat => {
-            const seatLast = seat.lastTickTs ?? ts
-            const seatDelta = (ts - seatLast) / 1000
-            if (seat.status === 'seated') {
-              return {
-                ...seat,
-                activeSeconds: seat.activeSeconds + seatDelta,
-                lastTickTs: ts,
-              }
-            }
-            if (seat.status === 'rest') {
-              return {
-                ...seat,
-                restSeconds: seat.restSeconds + seatDelta,
-                lastTickTs: ts,
-              }
-            }
-            return { ...seat, lastTickTs: ts }
-          })
+  const updateTable = (tableId: number, updater: (t: TableState) => TableState) => {
+    setTables((prev) => prev.map((tbl) => (tbl.id === tableId ? updater(tbl) : tbl)));
+  };
 
-          return {
-            ...table,
-            tableSeconds: table.tableSeconds + deltaSec,
-            lastTickTs: ts,
-            seats: updatedSeats,
-          }
-        })
-      })
-    }, TICK_INTERVAL)
-
-    return () => clearInterval(timer)
-  }, [setTables])
-
-  const toggleLang = () => setLang(prev => (prev === 'zh' ? 'en' : 'zh'))
-
-  const t = (key: string): string => {
-    const dict: Record<string, { zh: string; en: string }> = {
-      title: { zh: 'EVERWIN 撲克桌邊管理系統', en: 'EVERWIN Poker Table Manager' },
-      subtitle: {
-        zh: '多桌中央牌桌時鐘＋9座位上桌計時，適用於現場牌桌經理管理玩家時數與買籌碼記錄。本機儲存：每台裝置各自獨立紀錄。',
-        en: 'Multi-table central clock with 9-seat timers, designed for table managers to track player time and buy-ins. Local only: each device keeps its own records.',
-      },
-      today: { zh: '今天', en: 'Today' },
-      tableLabel: { zh: '桌號', en: 'Table' },
-      statusRunning: { zh: '運行中', en: 'Running' },
-      statusStopped: { zh: '未開桌', en: 'Stopped' },
-      start: { zh: '開桌 / 繼續', en: 'Start / Resume' },
-      pause: { zh: '暫停牌桌', en: 'Pause' },
-      stop: { zh: '關桌', en: 'Close Table' },
-      exportCsv: { zh: '匯出本局 CSV', en: 'Export CSV' },
-      resetTable: { zh: 'Reset 本桌', en: 'Reset Table' },
-      batchSeat: { zh: '批次上桌', en: 'Batch Seat' },
-      batchLeave: { zh: '批次下桌', en: 'Batch Leave' },
-      openedAt: { zh: '開桌時間', en: 'Opened at' },
-      closedAt: { zh: '關桌時間', en: 'Closed at' },
-      tableDuration: { zh: '本局時長', en: 'Session duration' },
-      langSwitch: { zh: '切換為英文 (中文)', en: 'Switch to Chinese (EN)' },
-      seat: { zh: '座位', en: 'Seat' },
-      memberId: { zh: '會員ID', en: 'Member ID' },
-      seatEmpty: { zh: '空位 / 未上桌', en: 'Empty / Not seated' },
-      seatSeated: { zh: '上桌中', en: 'Seated' },
-      seatRest: { zh: '休息中', en: 'Resting' },
-      todayTotal: { zh: '今日累積', en: 'Today total' },
-      todayTimes: { zh: '今日上桌次數', en: '# of sits' },
-      seatBtnSeat: { zh: '上桌', en: 'Seat' },
-      seatBtnRest: { zh: '休息', en: 'Rest' },
-      seatBtnLeave: { zh: '下桌', en: 'Leave' },
-      seatBtnBuy: { zh: '加買籌碼', en: 'Add chips' },
-      buyIn: { zh: '買籌碼', en: 'Buy-in' },
-      restSeconds: { zh: '休息秒數', en: 'Rest sec' },
-      occupancy: { zh: '佔桌率', en: 'Share' },
-      batchLabel: { zh: '批次', en: 'Batch' },
-    }
-    return dict[key]?.[lang] ?? key
-  }
-
-  const todayStr = useMemo(() => {
-    const d = new Date()
-    const y = d.getFullYear()
-    const m = `${d.getMonth() + 1}`.padStart(2, '0')
-    const day = `${d.getDate()}`.padStart(2, '0')
-    return `${y}-${m}-${day}`
-  }, [])
-
-  const handleStartTable = () => {
-    setTables(prev =>
-      prev.map((tbl, idx) => {
-        if (idx !== currentTableIndex) return tbl
-        if (tbl.isRunning) return tbl
-        const openedAt = tbl.openedAt ?? formatDateTime(new Date())
-        const ts = nowTs()
-        return {
-          ...tbl,
-          isRunning: true,
-          openedAt,
-          closedAt: null,
-          lastTickTs: ts,
-          seats: tbl.seats.map(s => ({ ...s, lastTickTs: ts })),
-        }
-      }),
-    )
-  }
-
-  const handlePauseTable = () => {
-    setTables(prev =>
-      prev.map((tbl, idx) => {
-        if (idx !== currentTableIndex) return tbl
-        return {
-          ...tbl,
-          isRunning: false,
-        }
-      }),
-    )
-  }
-
-  const handleStopTable = () => {
-    if (!window.confirm('確定要關閉本桌嗎？關桌後計時將停止，但資料仍保留，可匯出 CSV。')) return
-    setTables(prev =>
-      prev.map((tbl, idx) => {
-        if (idx !== currentTableIndex) return tbl
-        return {
-          ...tbl,
-          isRunning: false,
-          closedAt: formatDateTime(new Date()),
-        }
-      }),
-    )
-  }
-
-  const handleResetTable = () => {
-    if (!window.confirm('此動作會清空本桌的所有紀錄（含玩家紀錄）。建議先匯出 CSV，再進行 Reset。本動作無法復原，確定要執行嗎？')) {
-      return
-    }
-    setTables(prev =>
-      prev.map((tbl, idx) => {
-        if (idx !== currentTableIndex) return tbl
-        return createInitialTable(tbl.id)
-      }),
-    )
-  }
-
-  const guardRunning = (): boolean => {
-    const tbl = currentTable
-    if (!tbl.isRunning) {
-      window.alert('請先運營開桌再進行此操作。')
-      return false
-    }
-    return true
-  }
-
-  const updateSeat = (seatId: number, updater: (s: SeatState, table: TableState) => SeatState) => {
-    setTables(prev =>
-      prev.map((tbl, idx) => {
-        if (idx !== currentTableIndex) return tbl
-        return {
-          ...tbl,
-          seats: tbl.seats.map(s => (s.id === seatId ? updater(s, tbl) : s)),
-        }
-      }),
-    )
-  }
-
-  const handleSeat = (seat: SeatState) => {
-    if (!guardRunning()) return
-    updateSeat(seat.id, (s, tbl) => {
-      if (s.status === 'seated') return s
-      const ts = nowTs()
+  const handleStartOrResume = () => {
+    if (!currentTable) return;
+    const now = Date.now();
+    updateTable(currentTable.id, (tbl) => {
+      if (tbl.isRunning) return tbl;
+      const openedAt = tbl.openedAt ?? formatDateTime(new Date());
       return {
-        ...s,
-        status: 'seated',
-        joinCount: s.joinCount + 1,
-        lastTickTs: ts,
-      }
-    })
-  }
+        ...tbl,
+        openedAt,
+        isRunning: true,
+        lastStartTime: now,
+        closedAt: null,
+      };
+    });
+  };
 
-  const handleRest = (seat: SeatState) => {
-    if (!guardRunning()) return
-    updateSeat(seat.id, (s, tbl) => {
-      if (s.status === 'rest') return s
-      const ts = nowTs()
-      return {
-        ...s,
-        status: 'rest',
-        lastTickTs: ts,
-      }
-    })
-  }
+  const hasActivePlayers = (tbl: TableState): boolean =>
+    tbl.seats.some((s) => s.status === 'seated');
 
-  const handleLeave = (seat: SeatState) => {
-    updateSeat(seat.id, (s, tbl) => ({
-      ...s,
-      status: 'idle',
-      lastTickTs: nowTs(),
-      selected: false,
-    }))
-  }
-
-  const handleBuyIn = (seat: SeatState) => {
-    const input = window.prompt('請輸入本次加買籌碼金額（數字）：', '0')
-    if (!input) return
-    const val = Number(input)
-    if (!Number.isFinite(val) || val <= 0) {
-      window.alert('請輸入大於 0 的數字。')
-      return
+  const handlePause = () => {
+    if (!currentTable) return;
+    if (hasActivePlayers(currentTable)) {
+      window.alert(t.tableHasPlayers);
+      return;
     }
-    updateSeat(seat.id, s => ({
-      ...s,
-      buyIn: s.buyIn + val,
-    }))
-  }
+    const now = Date.now();
+    updateTable(currentTable.id, (tbl) => {
+      if (!tbl.isRunning || tbl.lastStartTime == null) return tbl;
+      const elapsedSeconds = getTableElapsedSeconds(tbl, now);
+      return {
+        ...tbl,
+        isRunning: false,
+        lastStartTime: null,
+        elapsedSeconds,
+      };
+    });
+  };
 
-  const toggleSeatSelected = (seatId: number) => {
-    updateSeat(seatId, s => ({
-      ...s,
-      selected: !s.selected,
-    }))
-  }
-
-  const handleBatchSeat = () => {
-    if (!guardRunning()) return
-    setTables(prev =>
-      prev.map((tbl, idx) => {
-        if (idx !== currentTableIndex) return tbl
-        const ts = nowTs()
-        return {
-          ...tbl,
-          seats: tbl.seats.map(s =>
-            s.selected
-              ? {
-                  ...s,
-                  status: 'seated',
-                  joinCount: s.joinCount + 1,
-                  lastTickTs: ts,
-                }
-              : s,
-          ),
-        }
-      }),
-    )
-  }
-
-  const handleBatchLeave = () => {
-    setTables(prev =>
-      prev.map((tbl, idx) => {
-        if (idx !== currentTableIndex) return tbl
-        const ts = nowTs()
-        return {
-          ...tbl,
-          seats: tbl.seats.map(s =>
-            s.selected
-              ? {
-                  ...s,
-                  status: 'idle',
-                  lastTickTs: ts,
-                  selected: false,
-                }
-              : s,
-          ),
-        }
-      }),
-    )
-  }
-
-  const handleMemberIdChange = (seatId: number, value: string) => {
-    updateSeat(seatId, s => ({
-      ...s,
-      memberId: value,
-    }))
-  }
-
-  // CSV export
-  const handleExportCsv = () => {
-    const tbl = currentTable
-    if (!tbl) return
-
-    const tableOpenedAt = tbl.openedAt ?? '-'
-    const tableClosedAt = tbl.closedAt ?? '-'
-    const tableDurationSec = tbl.tableSeconds
-    const totalActiveSeconds = tbl.seats.reduce((sum, s) => sum + s.activeSeconds, 0)
-
+  const exportCsvForTable = (tbl: TableState, closedAtOverride?: string) => {
+    const closedAt = closedAtOverride ?? tbl.closedAt ?? '';
+    const elapsed = getTableElapsedSeconds(tbl, nowMs);
     const headerLines = [
-      `Table,${tbl.name}`,
-      `Opened At,${tableOpenedAt}`,
-      `Closed At,${tableClosedAt}`,
-      `Session Seconds,${Math.floor(tableDurationSec)},Formatted,${formatHMS(tableDurationSec)}`,
-      `Total Active Seconds (All Seats),${Math.floor(totalActiveSeconds)}`,
-      '',
-    ]
+      ['Table', tbl.name],
+      ['Date', todayText],
+      ['Blinds', tbl.blinds ?? ''],
+      [t.openedAt, tbl.openedAt ?? ''],
+      [t.closedAt, closedAt],
+      [t.currentTableTime, formatHMS(elapsed)],
+      [''],
+    ];
 
     const columns = [
-      'Date',
-      'Table',
+      lang === 'zh' ? '日期' : 'Date',
       'Seat',
-      'MemberID',
-      'Status',
-      'ActiveSeconds',
-      'ActiveTime(HH:MM:SS)',
-      'RestSeconds',
-      'BuyIn',
-      'JoinCount',
-      'OccupancyShare',
-    ]
+      lang === 'zh' ? '會員號碼' : 'Member ID',
+      lang === 'zh' ? '上桌時間(秒)' : 'Active Seconds',
+      lang === 'zh' ? '休息秒數' : 'Rest Seconds',
+      lang === 'zh' ? '時長(格式)' : 'Duration (H:M:S)',
+      lang === 'zh' ? '買碼' : 'Buy-in',
+      lang === 'zh' ? '上桌次數' : 'Seat Count',
+    ];
 
-    const date = todayStr
-
-    const rows = tbl.seats.map(s => {
-      const share = totalActiveSeconds > 0 ? s.activeSeconds / totalActiveSeconds : 0
+    const rows = tbl.seats.map((seat) => {
+      const active = getSeatActiveSeconds(seat, nowMs);
+      const rest = getSeatRestSeconds(seat, nowMs);
+      const duration = formatHMS(active);
       return [
-        date,
-        tbl.name,
-        String(s.id),
-        s.memberId || '',
-        s.status,
-        String(Math.floor(s.activeSeconds)),
-        formatHMS(s.activeSeconds),
-        String(Math.floor(s.restSeconds)),
-        String(s.buyIn),
-        String(s.joinCount),
-        share > 0 ? (share * 100).toFixed(1) + '%' : '',
-      ]
-    })
+        todayText,
+        seat.id.toString(),
+        seat.memberId,
+        active.toString(),
+        rest.toString(),
+        duration,
+        seat.buyIn.toString(),
+        seat.joinCount.toString(),
+      ];
+    });
 
-    const csvLines: string[] = []
-    csvLines.push(...headerLines)
-    csvLines.push(columns.join(','))
-    for (const r of rows) {
-      csvLines.push(r.map(v => `"${v.replace(/"/g, '""')}"`).join(','))
+    const allLines = [...headerLines, columns, ...rows];
+    const csvContent = allLines
+      .map((line) => line.map((v) => `"${(v ?? '').replace(/"/g, '""')}"`).join(','))
+      .join('
+');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const fileName = `PokerSessions_${todayText.replace(/-/g, '')}_${tbl.name.replace(/\s+/g, '')}.csv`;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleStop = () => {
+    if (!currentTable) return;
+    if (hasActivePlayers(currentTable)) {
+      window.alert(t.tableHasPlayers);
+      return;
+    }
+    const now = Date.now();
+    const closedAtStr = formatDateTime(new Date());
+    const tableSnapshot: TableState = {
+      ...currentTable,
+      elapsedSeconds: getTableElapsedSeconds(currentTable, now),
+      closedAt: closedAtStr,
+    };
+    exportCsvForTable(tableSnapshot, closedAtStr);
+
+    updateTable(currentTable.id, (tbl) => {
+      const elapsedSeconds = getTableElapsedSeconds(tbl, now);
+      return {
+        ...tbl,
+        isRunning: false,
+        lastStartTime: null,
+        elapsedSeconds,
+        closedAt: closedAtStr,
+      };
+    });
+  };
+
+  const handleExportCsv = () => {
+    if (!currentTable) return;
+    exportCsvForTable(currentTable);
+  };
+
+  const handleResetTable = () => {
+    if (!currentTable) return;
+    if (!window.confirm('確定要重置本桌所有資料嗎？This will clear all data for this table.')) return;
+    updateTable(currentTable.id, (tbl) => createInitialTable(tbl.id));
+  };
+
+  const handleBlindsChange = (value: string) => {
+    if (!currentTable) return;
+    updateTable(currentTable.id, (tbl) => ({
+      ...tbl,
+      blinds: value,
+    }));
+  };
+
+  const handleToggleBatchSeat = (seatId: number) => {
+    if (!currentTable) return;
+    updateTable(currentTable.id, (tbl) => ({
+      ...tbl,
+      seats: tbl.seats.map((s) =>
+        s.id === seatId ? { ...s, selectedForBatch: !s.selectedForBatch } : s,
+      ),
+    }));
+  };
+
+  const handleMemberChange = (seatId: number, value: string) => {
+    if (!currentTable) return;
+    updateTable(currentTable.id, (tbl) => ({
+      ...tbl,
+      seats: tbl.seats.map((s) => (s.id === seatId ? { ...s, memberId: value.trim() } : s)),
+    }));
+  };
+
+  const checkDuplicateMember = (tbl: TableState, seatId: number, memberId: string): boolean => {
+    if (!memberId) return false;
+    return tbl.seats.some(
+      (s) =>
+        s.id !== seatId &&
+        s.memberId === memberId &&
+        (s.status === 'seated' || s.status === 'rest'),
+    );
+  };
+
+  const handleSeatUp = (seatId: number) => {
+    if (!currentTable) return;
+    const tbl = currentTable;
+
+    if (!tbl.isRunning) {
+      window.alert(t.tableNotRunning);
+      return;
     }
 
-    const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    const dateTag = todayStr.replace(/-/g, '')
-    a.download = `PokerSessions_${tbl.name}_${dateTag}.csv`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }
+    const seat = tbl.seats.find((s) => s.id === seatId);
+    if (!seat) return;
 
-  const totalActiveSeconds = currentTable.seats.reduce((sum, s) => sum + s.activeSeconds, 0)
+    const memberId = seat.memberId.trim();
+    if (!memberId) {
+      window.alert(t.needMemberId);
+      return;
+    }
+
+    if (checkDuplicateMember(tbl, seatId, memberId)) {
+      window.alert(t.duplicateMember);
+      return;
+    }
+
+    const now = Date.now();
+    updateTable(tbl.id, (prevTbl) => {
+      const seats = prevTbl.seats.map((s) => {
+        if (s.id !== seatId) return s;
+        if (s.status === 'seated') return s;
+        let activeSeconds = s.activeSeconds;
+        let restSeconds = s.restSeconds;
+        let joinCount = s.joinCount;
+        if (s.status === 'rest' && s.lastRestStart != null) {
+          const delta = Math.floor((now - s.lastRestStart) / 1000);
+          restSeconds += Math.max(0, delta);
+        }
+        if (s.status === 'idle') {
+          joinCount = s.joinCount + 1;
+          activeSeconds = 0;
+          restSeconds = 0;
+        }
+        return {
+          ...s,
+          status: 'seated' as SeatStatus,
+          lastActiveStart: now,
+          lastRestStart: null,
+          activeSeconds,
+          restSeconds,
+          joinCount,
+        };
+      });
+      return { ...prevTbl, seats };
+    });
+  };
+
+  const handleRest = (seatId: number) => {
+    if (!currentTable) return;
+    const now = Date.now();
+    updateTable(currentTable.id, (tbl) => {
+      const seats = tbl.seats.map((s) => {
+        if (s.id !== seatId) return s;
+        if (s.status !== 'seated' || s.lastActiveStart == null) return s;
+        const delta = Math.floor((now - s.lastActiveStart) / 1000);
+        const activeSeconds = s.activeSeconds + Math.max(0, delta);
+        return {
+          ...s,
+          status: 'rest' as SeatStatus,
+          lastActiveStart: null,
+          lastRestStart: now,
+          activeSeconds,
+        };
+      });
+      return { ...tbl, seats };
+    });
+  };
+
+  const handleLeave = (seatId: number) => {
+    if (!currentTable) return;
+    const now = Date.now();
+    updateTable(currentTable.id, (tbl) => {
+      const seats = tbl.seats.map((s) => {
+        if (s.id !== seatId) return s;
+        let activeSeconds = s.activeSeconds;
+        let restSeconds = s.restSeconds;
+        if (s.status === 'seated' && s.lastActiveStart != null) {
+          const delta = Math.floor((now - s.lastActiveStart) / 1000);
+          activeSeconds += Math.max(0, delta);
+        } else if (s.status === 'rest' && s.lastRestStart != null) {
+          const delta = Math.floor((now - s.lastRestStart) / 1000);
+          restSeconds += Math.max(0, delta);
+        }
+        return {
+          ...s,
+          status: 'idle' as SeatStatus,
+          lastActiveStart: null,
+          lastRestStart: null,
+          activeSeconds,
+          restSeconds,
+          selectedForBatch: false,
+          memberId: '',
+        };
+      });
+      return { ...tbl, seats };
+    });
+  };
+
+  const handleAddBuyIn = (seatId: number) => {
+    if (!currentTable) return;
+    const seat = currentTable.seats.find((s) => s.id === seatId);
+    if (!seat) return;
+    const raw = window.prompt(
+      lang === 'zh'
+        ? '請輸入加買籌碼數量（金額，可為 0）'
+        : 'Enter additional buy-in amount (can be 0)',
+      '0',
+    );
+    if (raw == null) return;
+    const amt = Number(raw);
+    if (!Number.isFinite(amt)) {
+      window.alert(t.invalidNumber);
+      return;
+    }
+    updateTable(currentTable.id, (tbl) => ({
+      ...tbl,
+      seats: tbl.seats.map((s) =>
+        s.id === seatId ? { ...s, buyIn: s.buyIn + Math.max(0, amt) } : s,
+      ),
+    }));
+  };
+
+  const handleBatchSeat = () => {
+    if (!currentTable) return;
+    const tbl = currentTable;
+    if (!tbl.isRunning) {
+      window.alert(t.tableNotRunning);
+      return;
+    }
+    const selected = tbl.seats.filter((s) => s.selectedForBatch);
+    if (selected.length === 0) {
+      window.alert(t.batchNoSelection);
+      return;
+    }
+    if (selected.some((s) => !s.memberId.trim())) {
+      window.alert(t.batchMissingMember);
+      return;
+    }
+
+    for (const s of selected) {
+      if (checkDuplicateMember(tbl, s.id, s.memberId.trim())) {
+        window.alert(t.duplicateMember);
+        return;
+      }
+    }
+
+    const raw = window.prompt(t.batchPromptChips, '0');
+    if (raw == null) return;
+    const amt = Number(raw);
+    if (!Number.isFinite(amt)) {
+      window.alert(t.invalidNumber);
+      return;
+    }
+    const buyInDelta = Math.max(0, amt);
+    const now = Date.now();
+    updateTable(tbl.id, (prevTbl) => {
+      const seats = prevTbl.seats.map((s) => {
+        if (!s.selectedForBatch) return s;
+        if (s.status === 'seated') return s;
+        let activeSeconds = s.activeSeconds;
+        let restSeconds = s.restSeconds;
+        let joinCount = s.joinCount;
+        if (s.status === 'rest' && s.lastRestStart != null) {
+          const delta = Math.floor((now - s.lastRestStart) / 1000);
+          restSeconds += Math.max(0, delta);
+        }
+        if (s.status === 'idle') {
+          joinCount = s.joinCount + 1;
+          activeSeconds = 0;
+          restSeconds = 0;
+        }
+        return {
+          ...s,
+          status: 'seated' as SeatStatus,
+          lastActiveStart: now,
+          lastRestStart: null,
+          activeSeconds,
+          restSeconds,
+          joinCount,
+          buyIn: s.buyIn + buyInDelta,
+        };
+      });
+      return { ...prevTbl, seats };
+    });
+  };
+
+  const tableElapsed = currentTable ? getTableElapsedSeconds(currentTable, nowMs) : 0;
 
   return (
     <div className="app-root">
       <div className="app-shell">
-        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
-          <div>
-            <div className="app-header-title">EVERWIN Poker Table Manager</div>
-            <div className="app-subtitle">{t('subtitle')}</div>
+        <header className="app-header">
+          <div className="app-header-main">
+            <div className="app-title">
+              <span>EVERWIN 撲克桌邊管理系統</span>
+              <span className="app-title-badge">Poker Table Manager</span>
+            </div>
+            <div className="app-subtitle">
+              多桌中央牌桌時間 + 9 座位上桌計時，適用於現場牌桌經理玩家時數與買碼籌碼紀錄。本機儲存：每台裝置各自獨立紀錄。
+            </div>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
-            <button className="lang-toggle" onClick={toggleLang}>
-              {t('langSwitch')}
+          <div className="app-header-right">
+            <button
+              type="button"
+              className="lang-toggle-btn"
+              onClick={() => setLang((prev) => (prev === 'zh' ? 'en' : 'zh'))}
+            >
+              {langToggleLabel}
             </button>
-            <div style={{ fontSize: 12, color: '#9ca3af' }}>
-              {t('today')}：{todayStr}
+            <div className="today-text">
+              {t.today}：{todayText}
             </div>
           </div>
         </header>
 
-        <main className="layout-main">
-          {/* Left: table clock & controls */}
-          <section className="table-panel">
-            <div className="table-selector-row">
-              <span className="table-label">{t('tableLabel')}</span>
+        <main className="app-body">
+          <section className="left-panel">
+            <div className="left-top-row">
+              <div className="table-selector-group">
+                <span className="label-pill">{t.tableLabel}</span>
+                <select
+                  className="table-select"
+                  value={currentTableId}
+                  onChange={(e) => setCurrentTableId(Number(e.target.value))}
+                >
+                  {tables.map((tbl) => (
+                    <option key={tbl.id} value={tbl.id}>
+                      {tbl.name}
+                    </option>
+                  ))}
+                </select>
 
-              {/* mobile: select */}
-              <select
-                className="table-select"
-                value={currentTableIndex}
-                onChange={e => setCurrentTableIndex(Number(e.target.value))}
-              >
-                {tables.map((tbl, idx) => (
-                  <option key={tbl.id} value={idx}>
-                    {tbl.name}
-                  </option>
-                ))}
-              </select>
+                <div className="table-tabs">
+                  {tables.map((tbl) => (
+                    <button
+                      key={tbl.id}
+                      type="button"
+                      className={
+                        'table-tab ' + (tbl.id === currentTableId ? 'table-tab-active' : '')
+                      }
+                      onClick={() => setCurrentTableId(tbl.id)}
+                    >
+                      {tbl.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
 
-              {/* desktop: tabs */}
-              <div className="table-tabs">
-                {tables.map((tbl, idx) => (
-                  <button
-                    key={tbl.id}
-                    className={
-                      'table-tab ' + (idx === currentTableIndex ? 'table-tab-active' : '')
-                    }
-                    onClick={() => setCurrentTableIndex(idx)}
-                  >
-                    {tbl.name}
-                  </button>
-                ))}
+            <div className="table-clock-wrapper">
+              <div className="clock-title-row">
+                <div className="clock-title">{currentTable?.name ?? 'Table 1'}</div>
+                <div
+                  className={
+                    'clock-status-text ' + (currentTable?.isRunning ? '' : 'stopped')
+                  }
+                >
+                  {currentTable?.isRunning ? t.running : t.stopped}
+                </div>
+              </div>
+              <div className="clock-display">{formatHMS(tableElapsed)}</div>
+              <div className="clock-meta-row">
+                <span>
+                  {t.openedAt}：{currentTable?.openedAt ?? '-'}
+                </span>
+                <span>
+                  {t.closedAt}：{currentTable?.closedAt ?? '-'}
+                </span>
+                <span>
+                  {t.currentTableTime}：{formatHMS(tableElapsed)}
+                </span>
               </div>
 
-              <span style={{ flex: 1 }} />
+              <div className="left-info-extra">
+                <div className="info-row">
+                  <span className="info-label">{t.blinds}</span>
+                  <input
+                    className="info-input"
+                    value={currentTable?.blinds ?? ''}
+                    placeholder={t.blindsPlaceholder}
+                    onChange={(e) => handleBlindsChange(e.target.value)}
+                  />
+                </div>
+              </div>
 
-              <span className="badge-status">
-                {currentTable.isRunning ? t('statusRunning') : t('statusStopped')}
-              </span>
-            </div>
+              <div className="clock-actions">
+                <button
+                  type="button"
+                  className="btn-pill btn-green"
+                  onClick={handleStartOrResume}
+                >
+                  {t.startOrResume}
+                </button>
+                <button
+                  type="button"
+                  className="btn-pill btn-yellow"
+                  onClick={handlePause}
+                >
+                  {t.pause}
+                </button>
+                <button type="button" className="btn-pill btn-red" onClick={handleStop}>
+                  {t.stop}
+                </button>
+              </div>
 
-            <div className="clock-display">{formatHMS(currentTable.tableSeconds)}</div>
-
-            <div className="clock-meta-row">
-              {t('openedAt')}：{currentTable.openedAt ?? '-'}
-            </div>
-            <div className="clock-meta-row">
-              {t('closedAt')}：{currentTable.closedAt ?? '-'}
-            </div>
-            <div className="clock-meta-row">
-              {t('tableDuration')}：{formatHMS(currentTable.tableSeconds)}
-            </div>
-            <div className="clock-meta-row">
-              {t('occupancy')}：{totalActiveSeconds > 0 ? formatHMS(totalActiveSeconds) : '00:00:00'}（全桌總上桌時數）
-            </div>
-
-            <div className="btn-row">
-              <button className="btn-pill btn-start" onClick={handleStartTable} disabled={currentTable.isRunning}>
-                {t('start')}
-              </button>
-              <button className="btn-pill btn-pause" onClick={handlePauseTable} disabled={!currentTable.isRunning}>
-                {t('pause')}
-              </button>
-              <button className="btn-pill btn-stop" onClick={handleStopTable}>
-                {t('stop')}
-              </button>
-            </div>
-
-            <div className="btn-row" style={{ marginTop: 16 }}>
-              <button className="btn-secondary" onClick={handleExportCsv}>
-                {t('exportCsv')}
-              </button>
-              <button className="btn-secondary" onClick={handleResetTable}>
-                {t('resetTable')}
-              </button>
-            </div>
-
-            <div className="btn-row" style={{ marginTop: 16 }}>
-              <button className="btn-secondary" onClick={handleBatchSeat}>
-                {t('batchSeat')}
-              </button>
-              <button className="btn-secondary" onClick={handleBatchLeave}>
-                {t('batchLeave')}
-              </button>
+              <div className="csv-reset-row">
+                <button
+                  type="button"
+                  className="btn-pill btn-outline"
+                  onClick={handleExportCsv}
+                >
+                  {t.exportCsv}
+                </button>
+                <button
+                  type="button"
+                  className="btn-pill btn-outline"
+                  onClick={handleResetTable}
+                >
+                  {t.resetTable}
+                </button>
+              </div>
             </div>
           </section>
 
-          {/* Right: seats */}
-          <section className="seats-panel">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-              <div className="chip">
-                <span className="chip-dot" />
-                <span style={{ fontWeight: 600, fontSize: 12 }}>{currentTable.name}</span>
-              </div>
-              <div style={{ fontSize: 11, color: '#9ca3af' }}>
-                {t('occupancy')}：
-                {totalActiveSeconds > 0 ? formatHMS(totalActiveSeconds) : '00:00:00'}
-              </div>
-            </div>
-
-            <div className="seats-grid">
-              {currentTable.seats.map(seat => {
+          <section className="right-panel">
+            <div className="seat-grid">
+              {currentTable?.seats.map((seat) => {
+                const activeSeconds = getSeatActiveSeconds(seat, nowMs);
+                const restSeconds = getSeatRestSeconds(seat, nowMs);
                 const statusLabel =
-                  seat.status === 'seated' ? t('seatSeated') : seat.status === 'rest' ? t('seatRest') : t('seatEmpty')
-                const statusColor =
-                  seat.status === 'seated'
-                    ? '#22c55e'
-                    : seat.status === 'rest'
-                    ? '#facc15'
-                    : 'rgba(148,163,184,0.6)'
-
-                const share =
-                  totalActiveSeconds > 0 && seat.activeSeconds > 0
-                    ? ((seat.activeSeconds / totalActiveSeconds) * 100).toFixed(1) + '%'
-                    : '-'
+                  seat.status === 'idle'
+                    ? t.statusIdle
+                    : seat.status === 'seated'
+                    ? t.statusSeated
+                    : t.statusRest;
+                const statusClass =
+                  seat.status === 'idle'
+                    ? 'status-idle'
+                    : seat.status === 'seated'
+                    ? 'status-seated'
+                    : 'status-rest';
 
                 return (
                   <div key={seat.id} className="seat-card">
-                    <div className="seat-header-row">
+                    <div className="seat-header">
                       <div>
-                        <div>
-                          {t('seat')} {seat.id}
-                        </div>
-                        <div style={{ marginTop: 2 }}>
-                          <span
-                            style={{
-                              padding: '2px 8px',
-                              borderRadius: 999,
-                              border: `1px solid ${statusColor}`,
-                              color: statusColor,
-                              fontSize: 10,
-                            }}
-                          >
-                            {statusLabel}
-                          </span>
-                        </div>
+                        <span className="seat-id">
+                          {t.seat} {seat.id}
+                        </span>
                       </div>
-
-                      <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: 10, marginBottom: 2 }}>{t('memberId')}</div>
-                        <input
-                          className="seat-id-input"
-                          value={seat.memberId}
-                          onChange={e => handleMemberIdChange(seat.id, e.target.value)}
-                          placeholder=""
-                        />
-                      </div>
+                      <div className={`seat-status-tag ${statusClass}`}>{statusLabel}</div>
                     </div>
-
-                    <div className="seat-timer">{formatHMS(seat.activeSeconds)}</div>
-
-                    <div className="seat-meta-row">
-                      {t('todayTotal')}：{formatHMS(seat.activeSeconds)}　{t('todayTimes')}：{seat.joinCount}
-                    </div>
-                    <div className="seat-meta-row">
-                      {t('buyIn')}：{seat.buyIn}　{t('restSeconds')}：{Math.floor(seat.restSeconds)}
-                    </div>
-
-                    <div className="seat-buttons-row">
-                      <button className="seat-btn seat-btn-green" onClick={() => handleSeat(seat)}>
-                        {t('seatBtnSeat')}
-                      </button>
-                      <button className="seat-btn seat-btn-yellow" onClick={() => handleRest(seat)}>
-                        {t('seatBtnRest')}
-                      </button>
-                      <button className="seat-btn seat-btn-red" onClick={() => handleLeave(seat)}>
-                        {t('seatBtnLeave')}
-                      </button>
-                      <button className="seat-btn seat-btn-blue" onClick={() => handleBuyIn(seat)}>
-                        {t('seatBtnBuy')}
-                      </button>
-                    </div>
-
-                    <div className="seat-footer-row">
+                    <div className="seat-timer">{formatHMS(activeSeconds)}</div>
+                    <div className="seat-meta">
                       <div>
-                        {t('occupancy')}：{share}
+                        <div className="meta-label">{t.todayTotal}</div>
+                        <div className="meta-value">{formatHMS(activeSeconds)}</div>
                       </div>
-                      <label className="checkbox-row">
+                      <div>
+                        <div className="meta-label">{t.todayCount}</div>
+                        <div className="meta-value">{seat.joinCount}</div>
+                      </div>
+                      <div>
+                        <div className="meta-label">{t.restSeconds}</div>
+                        <div className="meta-value">{restSeconds}</div>
+                      </div>
+                      <div>
+                        <div className="meta-label">{t.buyIn}</div>
+                        <div className="meta-value">{seat.buyIn}</div>
+                      </div>
+                    </div>
+                    <div className="seat-actions-row">
+                      <div className="seat-actions">
+                        <button
+                          type="button"
+                          className="seat-btn btn-xs-green"
+                          onClick={() => handleSeatUp(seat.id)}
+                        >
+                          {t.btnSeat}
+                        </button>
+                        <button
+                          type="button"
+                          className="seat-btn btn-xs-yellow"
+                          onClick={() => handleRest(seat.id)}
+                        >
+                          {t.btnRest}
+                        </button>
+                        <button
+                          type="button"
+                          className="seat-btn btn-xs-red"
+                          onClick={() => handleLeave(seat.id)}
+                        >
+                          {t.btnLeave}
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        className="seat-btn btn-xs-yellow"
+                        onClick={() => handleAddBuyIn(seat.id)}
+                      >
+                        {t.btnAddBuyIn}
+                      </button>
+                    </div>
+                    <div className="seat-extra-row">
+                      <input
+                        className="member-input"
+                        placeholder={t.memberId}
+                        value={seat.memberId}
+                        onChange={(e) => handleMemberChange(seat.id, e.target.value)}
+                      />
+                      <label className="batch-checkbox">
                         <input
                           type="checkbox"
-                          checked={seat.selected}
-                          onChange={() => toggleSeatSelected(seat.id)}
+                          checked={seat.selectedForBatch}
+                          onChange={() => handleToggleBatchSeat(seat.id)}
                         />
-                        <span>{t('batchLabel')}</span>
+                        {t.batchLabel}
                       </label>
                     </div>
                   </div>
-                )
+                );
               })}
+            </div>
+            <div className="app-footer-batch">
+              <button
+                type="button"
+                className="seat-btn btn-xs-green"
+                onClick={handleBatchSeat}
+              >
+                {lang === 'zh' ? '批次上桌' : 'Batch Seat'}
+              </button>
             </div>
           </section>
         </main>
       </div>
     </div>
-  )
-}
+  );
+};
 
-export default App
+export default App;
